@@ -1,0 +1,15 @@
+{
+  "files": {
+    "main.css": "/viravolta-multiplayer/static/css/main.e6c13ad2.css",
+    "main.js": "/viravolta-multiplayer/static/js/main.8dca63dc.js",
+    "static/js/453.66a2044e.chunk.js": "/viravolta-multiplayer/static/js/453.66a2044e.chunk.js",
+    "index.html": "/viravolta-multiplayer/index.html",
+    "main.e6c13ad2.css.map": "/viravolta-multiplayer/static/css/main.e6c13ad2.css.map",
+    "main.8dca63dc.js.map": "/viravolta-multiplayer/static/js/main.8dca63dc.js.map",
+    "453.66a2044e.chunk.js.map": "/viravolta-multiplayer/static/js/453.66a2044e.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.e6c13ad2.css",
+    "static/js/main.8dca63dc.js"
+  ]
+}
