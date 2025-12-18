@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
-import { getDatabase, ref, set, onValue, push, remove, update } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
+import { getDatabase, ref, set, onValue, remove, update } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyACmxWbxC8ghcbd2LAvX3ytdfNwv8",
@@ -12,7 +12,6 @@ const firebaseConfig = {
   appId: "1:782716865934:web:ec4f131b6b53a488a6e8df"
 };
 
-// Initialize Firebase (usar config real ou modo demo)
 let app, database;
 try {
   app = initializeApp(firebaseConfig);
@@ -34,7 +33,7 @@ const PLAYER_AVATARS = ['🧑', '👩', '👨', '🧒'];
 
 const ViraVoltaMultiplayer = () => {
   // Estados de UI
-  const [screen, setScreen] = useState('menu'); // menu, lobby, game, gameOver
+  const [screen, setScreen] = useState('menu');
   const [playerName, setPlayerName] = useState('');
   const [playerId, setPlayerId] = useState(null);
   const [roomCode, setRoomCode] = useState('');
@@ -46,6 +45,10 @@ const ViraVoltaMultiplayer = () => {
   const [myHand, setMyHand] = useState([]);
   const [message, setMessage] = useState('');
   const [rolling, setRolling] = useState(false);
+  
+  // Estados para modal de paridade
+  const [showParityModal, setShowParityModal] = useState(false);
+  const [pendingCardPlay, setPendingCardPlay] = useState(null);
 
   useEffect(() => {
     if (!playerId) {
@@ -74,9 +77,17 @@ const ViraVoltaMultiplayer = () => {
     }
   }, [room, playerId]);
 
+  // Avisar sobre compra pendente
+  useEffect(() => {
+    if (gameState && gameState.pendingDrawCards > 0 && gameState.currentPlayerId === playerId) {
+      setMessage(`⚠️ Você deve comprar ${gameState.pendingDrawCards} carta(s)! Clique em "Comprar".`);
+    }
+  }, [gameState?.pendingDrawCards, gameState?.currentPlayerId, playerId]);
+
   const createDeck = () => {
     const newDeck = [];
     
+    // Cartas numéricas 0-20
     for (let i = 0; i <= 20; i++) {
       const color = i % 2 === 0 ? 'red' : 'green';
       const parity = i % 2 === 0 ? 'PAR' : 'ÍMPAR';
@@ -92,6 +103,7 @@ const ViraVoltaMultiplayer = () => {
       if (i <= 10) newDeck.push({...card, id: `num_${i}_${Math.random()}_2`});
     }
 
+    // Cartas de símbolo (>, <, =)
     ['>', '<', '='].forEach(symbol => {
       for (let i = 0; i < 4; i++) {
         newDeck.push({
@@ -105,6 +117,7 @@ const ViraVoltaMultiplayer = () => {
       }
     });
 
+    // Cartas de ação (+1, +2, +4)
     ['+1', '+2', '+4'].forEach(action => {
       for (let i = 0; i < 2; i++) {
         newDeck.push({
@@ -118,6 +131,7 @@ const ViraVoltaMultiplayer = () => {
       }
     });
 
+    // Cartas reverse
     for (let i = 0; i < 3; i++) {
       newDeck.push({
         id: `rev_${i}`,
@@ -183,7 +197,7 @@ const ViraVoltaMultiplayer = () => {
     if (database) {
       const roomRef = ref(database, `rooms/${roomCode.toUpperCase()}`);
       
-      const snapshot = await onValue(roomRef, (snap) => {
+      onValue(roomRef, (snap) => {
         const data = snap.val();
         if (data) {
           const playerCount = Object.keys(data.players || {}).length;
@@ -210,7 +224,6 @@ const ViraVoltaMultiplayer = () => {
         }
       }, { onlyOnce: true });
     } else {
-      // Modo demo local
       setRoom(roomCode.toUpperCase());
       setScreen('lobby');
     }
@@ -219,9 +232,11 @@ const ViraVoltaMultiplayer = () => {
   const toggleReady = async () => {
     if (database && room) {
       const playerRef = ref(database, `rooms/${room}/players/${playerId}`);
-      const snapshot = await onValue(playerRef, (snap) => {
+      onValue(playerRef, (snap) => {
         const player = snap.val();
-        update(playerRef, { ready: !player.ready });
+        if (player) {
+          update(playerRef, { ready: !player.ready });
+        }
       }, { onlyOnce: true });
     }
   };
@@ -230,7 +245,7 @@ const ViraVoltaMultiplayer = () => {
     if (!database || !room) return;
 
     const roomRef = ref(database, `rooms/${room}`);
-    const snapshot = await onValue(roomRef, (snap) => {
+    onValue(roomRef, (snap) => {
       const data = snap.val();
       const playerList = Object.values(data.players || {});
       
@@ -247,6 +262,7 @@ const ViraVoltaMultiplayer = () => {
       const deck = createDeck();
       const hands = {};
       
+      // Distribuir 5 cartas para cada jogador
       playerList.forEach(player => {
         hands[player.id] = [];
         for (let i = 0; i < 5; i++) {
@@ -254,16 +270,30 @@ const ViraVoltaMultiplayer = () => {
         }
       });
 
+      // IMPORTANTE: Garantir que carta inicial seja numérica
+      let firstCard;
+      do {
+        firstCard = deck.pop();
+      } while (firstCard && firstCard.type !== 'number');
+
+      if (!firstCard) {
+        firstCard = deck.pop(); // Fallback improvável
+      }
+
       const initialState = {
         deck: deck,
-        discardPile: [deck.pop()],
+        discardPile: [firstCard],
         currentPlayerIndex: 0,
         currentPlayerId: playerList[0].id,
         diceResult: null,
         direction: 1,
         playerOrder: playerList.map(p => p.id),
         started: true,
-        turnStartTime: Date.now()
+        turnStartTime: Date.now(),
+        // Novos campos para lógica correta
+        nextCardParity: null,  // 'par' ou 'impar'
+        skipDiceRoll: false,   // true quando carta especial define regra
+        pendingDrawCards: 0    // quantidade de cartas que próximo deve comprar
       };
 
       // Atualizar mãos dos jogadores
@@ -282,6 +312,7 @@ const ViraVoltaMultiplayer = () => {
     if (!database || !room || !gameState) return;
     if (gameState.currentPlayerId !== playerId) return;
     if (gameState.diceResult) return;
+    if (gameState.skipDiceRoll) return; // Não pode rolar se carta especial já definiu regra
 
     setRolling(true);
     
@@ -298,15 +329,63 @@ const ViraVoltaMultiplayer = () => {
   };
 
   const canPlayCard = (card) => {
-    if (!gameState || !gameState.diceResult) return false;
+    if (!gameState) return false;
+    
     const topCard = gameState.discardPile[gameState.discardPile.length - 1];
     
-    if (card.type === 'action' || card.type === 'reverse' || card.type === 'symbol') return true;
+    // REGRA 1: Se há compra pendente, só pode comprar (não pode jogar)
+    if (gameState.pendingDrawCards > 0) {
+      return false;
+    }
     
-    if (card.type === 'number' && topCard.type === 'number') {
-      if (gameState.diceResult === '>') return card.value > topCard.value;
-      if (gameState.diceResult === '<') return card.value < topCard.value;
-      if (gameState.diceResult === '=') return card.value === topCard.value;
+    // REGRA 2: Cartas de AÇÃO podem ser jogadas a qualquer momento
+    if (card.type === 'action') {
+      return true;
+    }
+    
+    // REGRA 3: Cartas de SÍMBOLO podem ser jogadas a qualquer momento
+    if (card.type === 'symbol') {
+      return true;
+    }
+    
+    // REGRA 4: Cartas REVERSE só se a COR bater
+    if (card.type === 'reverse') {
+      return card.color === topCard.color;
+    }
+    
+    // REGRA 5: Cartas NUMÉRICAS - lógica complexa
+    if (card.type === 'number') {
+      
+      // Caso 5.1: Há escolha de PARIDADE ativa
+      if (gameState.nextCardParity) {
+        const isPar = card.value % 2 === 0;
+        const expectedParity = gameState.nextCardParity === 'par';
+        const matchesParity = isPar === expectedParity;
+        
+        if (!matchesParity) {
+          return false;
+        }
+        
+        // Se paridade bate, verificar regra do dado (se houver)
+        if (gameState.diceResult && topCard.type === 'number') {
+          if (gameState.diceResult === '>') return card.value > topCard.value;
+          if (gameState.diceResult === '<') return card.value < topCard.value;
+          if (gameState.diceResult === '=') return card.value === topCard.value;
+        }
+        
+        // Se só tem paridade (sem dado), está OK
+        return true;
+      }
+      
+      // Caso 5.2: Há resultado de DADO
+      if (gameState.diceResult && topCard.type === 'number') {
+        if (gameState.diceResult === '>') return card.value > topCard.value;
+        if (gameState.diceResult === '<') return card.value < topCard.value;
+        if (gameState.diceResult === '=') return card.value === topCard.value;
+      }
+      
+      // Caso 5.3: Sem dado e sem paridade - não pode jogar
+      return false;
     }
     
     return false;
@@ -314,14 +393,29 @@ const ViraVoltaMultiplayer = () => {
 
   const playCard = async (cardIndex) => {
     if (!database || !room || !gameState) return;
-    if (gameState.currentPlayerId !== playerId) return;
-
-    const card = myHand[cardIndex];
-    if (!canPlayCard(card)) {
-      setMessage('Carta inválida!');
+    if (gameState.currentPlayerId !== playerId) {
+      setMessage('❌ Não é seu turno!');
       return;
     }
 
+    const card = myHand[cardIndex];
+    if (!canPlayCard(card)) {
+      setMessage('❌ Carta inválida! Verifique as regras.');
+      return;
+    }
+
+    // Cartas especiais requerem escolha de paridade
+    if (card.type === 'action' || card.type === 'symbol') {
+      setPendingCardPlay({ card, cardIndex });
+      setShowParityModal(true);
+      return;
+    }
+
+    // Cartas normais executam direto
+    await executeCardPlay(card, cardIndex, null);
+  };
+
+  const executeCardPlay = async (card, cardIndex, parityChoice) => {
     const newHand = [...myHand];
     newHand.splice(cardIndex, 1);
     
@@ -342,31 +436,65 @@ const ViraVoltaMultiplayer = () => {
       return;
     }
 
-    // Aplicar efeitos da carta
+    // Preparar updates
     let updates = {
       discardPile: newDiscardPile,
-      diceResult: null
+      diceResult: null,
+      nextCardParity: null,
+      skipDiceRoll: false,
+      pendingDrawCards: 0
     };
 
+    let deckCopy = [...gameState.deck]; // IMPORTANTE: Criar cópia!
+
+    // CARTA DE AÇÃO (+1, +2, +4)
     if (card.type === 'action') {
       const amount = parseInt(card.value.replace('+', ''));
       const nextPlayerIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.playerOrder.length) % gameState.playerOrder.length;
       const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
       
-      const snapshot = await onValue(ref(database, `rooms/${room}/players/${nextPlayerId}`), (snap) => {
+      updates.pendingDrawCards = amount;
+      updates.nextCardParity = parityChoice;
+      updates.skipDiceRoll = true;
+      
+      // Comprar cartas do deck
+      const cardsToAdd = [];
+      for (let i = 0; i < amount && deckCopy.length > 0; i++) {
+        cardsToAdd.push(deckCopy.pop());
+      }
+      
+      updates.deck = deckCopy;
+      
+      // Atualizar mão do próximo jogador
+      onValue(ref(database, `rooms/${room}/players/${nextPlayerId}`), (snap) => {
         const nextPlayer = snap.val();
-        const newNextHand = [...nextPlayer.hand];
-        for (let i = 0; i < amount && gameState.deck.length > 0; i++) {
-          newNextHand.push(gameState.deck.pop());
+        if (nextPlayer) {
+          update(ref(database, `rooms/${room}/players/${nextPlayerId}`), {
+            hand: [...(nextPlayer.hand || []), ...cardsToAdd]
+          });
         }
-        update(ref(database, `rooms/${room}/players/${nextPlayerId}`), {
-          hand: newNextHand
-        });
       }, { onlyOnce: true });
     }
 
+    // CARTA DE SÍMBOLO (>, <, =)
+    if (card.type === 'symbol') {
+      updates.diceResult = card.value;
+      updates.nextCardParity = parityChoice;
+      updates.skipDiceRoll = true;
+    }
+
+    // CARTA REVERSE
     if (card.type === 'reverse') {
       updates.direction = -gameState.direction;
+      // Paridade baseada na cor: Verde = ímpar, Vermelho = par
+      updates.nextCardParity = card.color === 'green' ? 'impar' : 'par';
+      updates.skipDiceRoll = true;
+    }
+
+    // CARTA NUMÉRICA
+    if (card.type === 'number') {
+      updates.nextCardParity = null;
+      updates.skipDiceRoll = false;
     }
 
     // Passar turno
@@ -376,15 +504,61 @@ const ViraVoltaMultiplayer = () => {
     updates.turnStartTime = Date.now();
 
     await update(ref(database, `rooms/${room}/gameState`), updates);
+    setMessage('✅ Carta jogada!');
+  };
+
+  const handleParityChoice = async (parity) => {
+    setShowParityModal(false);
+    if (pendingCardPlay) {
+      await executeCardPlay(
+        pendingCardPlay.card,
+        pendingCardPlay.cardIndex,
+        parity
+      );
+      setPendingCardPlay(null);
+    }
   };
 
   const drawCard = async () => {
     if (!database || !room || !gameState) return;
-    if (gameState.currentPlayerId !== playerId) return;
-    if (!gameState.diceResult) return;
+    if (gameState.currentPlayerId !== playerId) {
+      setMessage('❌ Não é seu turno!');
+      return;
+    }
+    
+    // CASO 1: Compra obrigatória
+    if (gameState.pendingDrawCards > 0) {
+      const nextIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.playerOrder.length) % gameState.playerOrder.length;
+      
+      await update(ref(database, `rooms/${room}/gameState`), {
+        pendingDrawCards: 0,
+        currentPlayerIndex: nextIndex,
+        currentPlayerId: gameState.playerOrder[nextIndex],
+        turnStartTime: Date.now()
+      });
+      
+      setMessage('✅ Cartas compradas, turno passado');
+      return;
+    }
+    
+    // CASO 2: Compra voluntária
+    if (!gameState.diceResult && !gameState.skipDiceRoll) {
+      setMessage('❌ Role o dado primeiro!');
+      return;
+    }
 
     if (gameState.deck.length === 0) {
-      setMessage('Baralho vazio!');
+      setMessage('❌ Baralho vazio! Passando turno...');
+      const nextIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.playerOrder.length) % gameState.playerOrder.length;
+      
+      await update(ref(database, `rooms/${room}/gameState`), {
+        diceResult: null,
+        nextCardParity: null,
+        skipDiceRoll: false,
+        currentPlayerIndex: nextIndex,
+        currentPlayerId: gameState.playerOrder[nextIndex],
+        turnStartTime: Date.now()
+      });
       return;
     }
 
@@ -399,14 +573,16 @@ const ViraVoltaMultiplayer = () => {
     const nextIndex = (gameState.currentPlayerIndex + gameState.direction + gameState.playerOrder.length) % gameState.playerOrder.length;
     
     await update(ref(database, `rooms/${room}/gameState`), {
-      deck: newDeck,
+      deck: newDeck, // IMPORTANTE: Salvar deck atualizado!
       diceResult: null,
+      nextCardParity: null,
+      skipDiceRoll: false,
       currentPlayerIndex: nextIndex,
       currentPlayerId: gameState.playerOrder[nextIndex],
       turnStartTime: Date.now()
     });
 
-    setMessage('Você comprou uma carta');
+    setMessage('✅ Você comprou uma carta');
   };
 
   const leaveRoom = async () => {
@@ -417,9 +593,87 @@ const ViraVoltaMultiplayer = () => {
     setRoom(null);
     setGameState(null);
     setPlayers([]);
+    setMessage('');
   };
 
   // === COMPONENTES ===
+
+  const ParityChoiceModal = ({ onChoice, cardPlayed }) => {
+    return (
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: 'rgba(0,0,0,0.8)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000
+      }}>
+        <div style={{
+          background: 'white',
+          padding: '40px',
+          borderRadius: '20px',
+          textAlign: 'center',
+          maxWidth: '450px',
+          color: '#333',
+          boxShadow: '0 10px 40px rgba(0,0,0,0.5)'
+        }}>
+          <div style={{ fontSize: '3em', marginBottom: '15px' }}>🐊</div>
+          <h2 style={{ marginBottom: '20px', color: '#2c3e50' }}>
+            Escolha a Próxima Carta
+          </h2>
+          <p style={{ marginBottom: '30px', fontSize: '1.1em', lineHeight: '1.5' }}>
+            Você jogou <strong>{cardPlayed.label}</strong>.
+            <br/>
+            Escolha se a próxima carta deve ser:
+          </p>
+          <div style={{ display: 'flex', gap: '20px', justifyContent: 'center' }}>
+            <button
+              onClick={() => onChoice('par')}
+              style={{
+                background: 'linear-gradient(135deg, #e74c3c, #c0392b)',
+                color: 'white',
+                border: 'none',
+                padding: '20px 40px',
+                fontSize: '1.3em',
+                borderRadius: '15px',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                boxShadow: '0 4px 8px rgba(0,0,0,0.3)',
+                transition: 'transform 0.2s'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
+              onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+            >
+              🔴 PAR
+            </button>
+            <button
+              onClick={() => onChoice('impar')}
+              style={{
+                background: 'linear-gradient(135deg, #2ecc71, #27ae60)',
+                color: 'white',
+                border: 'none',
+                padding: '20px 40px',
+                fontSize: '1.3em',
+                borderRadius: '15px',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                boxShadow: '0 4px 8px rgba(0,0,0,0.3)',
+                transition: 'transform 0.2s'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
+              onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+            >
+              🟢 ÍMPAR
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const Card = ({ card, onClick, small, disabled, isBack }) => {
     const size = small ? 90 : 120;
@@ -471,7 +725,7 @@ const ViraVoltaMultiplayer = () => {
 
     return (
       <div
-        onClick={onClick}
+        onClick={disabled ? null : onClick}
         style={{
           width: `${size}px`,
           height: `${height}px`,
@@ -655,7 +909,8 @@ const ViraVoltaMultiplayer = () => {
               fontSize: '1.1em',
               borderRadius: '10px',
               border: 'none',
-              marginBottom: '20px'
+              marginBottom: '20px',
+              boxSizing: 'border-box'
             }}
           />
 
@@ -691,7 +946,8 @@ const ViraVoltaMultiplayer = () => {
               borderRadius: '10px',
               border: 'none',
               marginBottom: '15px',
-              textTransform: 'uppercase'
+              textTransform: 'uppercase',
+              boxSizing: 'border-box'
             }}
           />
 
@@ -771,7 +1027,7 @@ const ViraVoltaMultiplayer = () => {
             ))}
           </div>
 
-          <div style={{ display: 'flex', gap: '15px', justifyContent: 'center' }}>
+          <div style={{ display: 'flex', gap: '15px', justifyContent: 'center', flexWrap: 'wrap' }}>
             <button
               onClick={toggleReady}
               style={{
@@ -824,6 +1080,18 @@ const ViraVoltaMultiplayer = () => {
               🚪 Sair
             </button>
           </div>
+
+          {message && (
+            <div style={{
+              background: 'rgba(255,255,255,0.2)',
+              padding: '15px',
+              borderRadius: '10px',
+              textAlign: 'center',
+              marginTop: '20px'
+            }}>
+              {message}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -848,7 +1116,7 @@ const ViraVoltaMultiplayer = () => {
           background: 'rgba(255,255,255,0.1)',
           backdropFilter: 'blur(10px)',
           borderRadius: '20px',
-          padding: '30px'
+          padding: '25px'
         }}>
           {/* Info Panel */}
           <div style={{
@@ -880,8 +1148,19 @@ const ViraVoltaMultiplayer = () => {
             }}>
               <h4 style={{ margin: '0 0 8px 0' }}>Regra</h4>
               <div style={{ fontSize: '1.5em', fontWeight: 'bold' }}>
-                {gameState.diceResult ? gameState.diceResult : '🎲'}
+                {gameState.nextCardParity ? (
+                  <>
+                    {gameState.nextCardParity === 'par' ? '🔴 PAR' : '🟢 ÍMPAR'}
+                  </>
+                ) : (
+                  gameState.diceResult ? gameState.diceResult : '🎲'
+                )}
               </div>
+              {gameState.skipDiceRoll && (
+                <div style={{ fontSize: '0.7em', marginTop: '5px', opacity: 0.8 }}>
+                  (Sem dado)
+                </div>
+              )}
             </div>
 
             <div style={{
@@ -893,7 +1172,7 @@ const ViraVoltaMultiplayer = () => {
             }}>
               <h4 style={{ margin: '0 0 8px 0' }}>Monte</h4>
               <div style={{ fontSize: '1.5em', fontWeight: 'bold' }}>
-                {gameState.deck.length}
+                {gameState.deck.length} 🃏
               </div>
             </div>
           </div>
@@ -935,12 +1214,13 @@ const ViraVoltaMultiplayer = () => {
             alignItems: 'center',
             gap: '30px',
             margin: '30px 0',
-            minHeight: '200px'
+            minHeight: '200px',
+            flexWrap: 'wrap'
           }}>
             <Card card={{}} isBack />
 
             <div
-              onClick={isMyTurn ? rollDice : null}
+              onClick={isMyTurn && !gameState.skipDiceRoll ? rollDice : null}
               style={{
                 width: '110px',
                 height: '110px',
@@ -951,14 +1231,14 @@ const ViraVoltaMultiplayer = () => {
                 alignItems: 'center',
                 fontSize: '3.5em',
                 color: '#333',
-                cursor: isMyTurn && !gameState.diceResult ? 'pointer' : 'not-allowed',
+                cursor: isMyTurn && !gameState.diceResult && !gameState.skipDiceRoll ? 'pointer' : 'not-allowed',
                 boxShadow: '0 10px 20px rgba(0,0,0,0.25)',
                 animation: rolling ? 'spin 0.5s ease-in-out' : 'none',
                 border: '4px solid #ddd',
-                opacity: !isMyTurn ? 0.5 : 1
+                opacity: !isMyTurn || gameState.skipDiceRoll ? 0.5 : 1
               }}
             >
-              {gameState.diceResult || '🎲'}
+              {gameState.skipDiceRoll ? '⏭️' : (gameState.diceResult || '🎲')}
             </div>
 
             {topCard && <Card card={topCard} />}
@@ -966,7 +1246,9 @@ const ViraVoltaMultiplayer = () => {
 
           {/* Minha mão */}
           <div>
-            <h3 style={{ textAlign: 'center', marginBottom: '15px' }}>Sua Mão</h3>
+            <h3 style={{ textAlign: 'center', marginBottom: '15px' }}>
+              Sua Mão {isMyTurn && '(Seu turno!)'}
+            </h3>
             <div style={{
               display: 'flex',
               justifyContent: 'center',
@@ -1015,13 +1297,14 @@ const ViraVoltaMultiplayer = () => {
             display: 'flex',
             justifyContent: 'center',
             gap: '15px',
-            marginTop: '25px'
+            marginTop: '25px',
+            flexWrap: 'wrap'
           }}>
             <button
               onClick={rollDice}
-              disabled={rolling || gameState.diceResult || !isMyTurn}
+              disabled={rolling || gameState.diceResult || !isMyTurn || gameState.skipDiceRoll}
               style={{
-                background: rolling || gameState.diceResult || !isMyTurn 
+                background: rolling || gameState.diceResult || !isMyTurn || gameState.skipDiceRoll
                   ? 'linear-gradient(135deg, #95a5a6, #7f8c8d)' 
                   : 'linear-gradient(135deg, #3498db, #2980b9)',
                 color: 'white',
@@ -1029,18 +1312,18 @@ const ViraVoltaMultiplayer = () => {
                 padding: '14px 35px',
                 fontSize: '1.1em',
                 borderRadius: '30px',
-                cursor: rolling || gameState.diceResult || !isMyTurn ? 'not-allowed' : 'pointer',
+                cursor: rolling || gameState.diceResult || !isMyTurn || gameState.skipDiceRoll ? 'not-allowed' : 'pointer',
                 fontWeight: 'bold'
               }}
             >
-              🎲 Rolar Dado
+              {gameState.skipDiceRoll ? '⏭️ Sem Dado' : '🎲 Rolar Dado'}
             </button>
 
             <button
               onClick={drawCard}
-              disabled={!gameState.diceResult || !isMyTurn}
+              disabled={(!gameState.diceResult && !gameState.skipDiceRoll && !gameState.pendingDrawCards) || !isMyTurn}
               style={{
-                background: !gameState.diceResult || !isMyTurn 
+                background: (!gameState.diceResult && !gameState.skipDiceRoll && !gameState.pendingDrawCards) || !isMyTurn
                   ? 'linear-gradient(135deg, #95a5a6, #7f8c8d)' 
                   : 'linear-gradient(135deg, #e67e22, #d35400)',
                 color: 'white',
@@ -1048,7 +1331,7 @@ const ViraVoltaMultiplayer = () => {
                 padding: '14px 35px',
                 fontSize: '1.1em',
                 borderRadius: '30px',
-                cursor: !gameState.diceResult || !isMyTurn ? 'not-allowed' : 'pointer',
+                cursor: (!gameState.diceResult && !gameState.skipDiceRoll && !gameState.pendingDrawCards) || !isMyTurn ? 'not-allowed' : 'pointer',
                 fontWeight: 'bold'
               }}
             >
@@ -1088,6 +1371,14 @@ const ViraVoltaMultiplayer = () => {
           )}
         </div>
 
+        {/* Modal de escolha de paridade */}
+        {showParityModal && pendingCardPlay && (
+          <ParityChoiceModal 
+            onChoice={handleParityChoice}
+            cardPlayed={pendingCardPlay.card}
+          />
+        )}
+
         <style>{`
           @keyframes spin {
             0%, 100% { transform: rotate(0deg); }
@@ -1101,6 +1392,67 @@ const ViraVoltaMultiplayer = () => {
             50% { transform: scale(1.05); }
           }
         `}</style>
+      </div>
+    );
+  }
+
+  if (screen === 'gameOver') {
+    const winner = players.find(p => p.id === gameState?.winner);
+    const isWinner = gameState?.winner === playerId;
+
+    return (
+      <div style={{
+        fontFamily: 'Comic Sans MS, cursive',
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        minHeight: '100vh',
+        padding: '20px',
+        color: 'white',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }}>
+        <div style={{
+          background: 'rgba(255,255,255,0.1)',
+          backdropFilter: 'blur(10px)',
+          borderRadius: '20px',
+          padding: '40px',
+          maxWidth: '500px',
+          width: '100%',
+          textAlign: 'center'
+        }}>
+          <div style={{ fontSize: '5em', marginBottom: '20px' }}>
+            {isWinner ? '🎉' : '🐊'}
+          </div>
+          <h1 style={{ marginBottom: '20px' }}>
+            {isWinner ? 'VOCÊ VENCEU!' : 'FIM DE JOGO'}
+          </h1>
+          <p style={{ fontSize: '1.3em', marginBottom: '30px' }}>
+            {winner && (
+              <>
+                {winner.avatar} <strong>{winner.name}</strong> venceu!
+              </>
+            )}
+          </p>
+          <button
+            onClick={() => {
+              leaveRoom();
+              setScreen('menu');
+            }}
+            style={{
+              width: '100%',
+              background: 'linear-gradient(135deg, #3498db, #2980b9)',
+              color: 'white',
+              border: 'none',
+              padding: '15px',
+              fontSize: '1.2em',
+              borderRadius: '10px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            Voltar ao Menu
+          </button>
+        </div>
       </div>
     );
   }
