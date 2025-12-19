@@ -1,6 +1,6 @@
 # 🐊 ViraVolta
 
-Jogo de cartas multiplayer online inspirado em UNO, com mecânicas matemáticas educativas usando a Língua Brasileira de Sinais (Libras).
+Jogo de cartas multiplayer online inspirado no físico chamado ViraVolta, com mecânicas matemáticas educativas usando a Língua Brasileira de Sinais (Libras).
 
 ## 🎮 Como Jogar
 
