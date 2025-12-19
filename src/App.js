@@ -47,27 +47,27 @@ const TURN_TIME = 45; // Tempo um pouco maior para pensar na matemática + cor
 // --- FUNÇÃO PARA OBTER CAMINHO DA IMAGEM DA CARTA ---
 const getCardImagePath = (card, isBack = false) => {
   if (isBack) {
-    return '/cards/back.png';
+    return 'cards/back.png';
   }
   
   if (card.type === 'number') {
-    return `/cards/${card.value}_${card.color}.png`;
+    return `cards/${card.value}_${card.color}.png`;
   }
   
   if (card.type === 'wild') {
-    return '/cards/wild.png';
+    return 'cards/wild.png';
   }
   
   if (card.type === 'reverse_wild') {
-    return '/cards/reverse.png';
+    return 'cards/reverse.png';
   }
   
   if (card.type === 'action') {
-    if (card.value === '+2') return '/cards/plus2.png';
-    if (card.value === '+4') return '/cards/plus4.png';
+    if (card.value === '+2') return 'cards/plus2.png';
+    if (card.value === '+4') return 'cards/plus4.png';
   }
   
-  return '/cards/back.png';
+  return 'cards/back.png';
 };
 
 // --- COMPONENTE PRINCIPAL ---
