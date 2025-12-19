@@ -44,6 +44,32 @@ const COLORS = {
 
 const TURN_TIME = 45; // Tempo um pouco maior para pensar na matemática + cor
 
+// --- FUNÇÃO PARA OBTER CAMINHO DA IMAGEM DA CARTA ---
+const getCardImagePath = (card, isBack = false) => {
+  if (isBack) {
+    return '/cards/back.png';
+  }
+  
+  if (card.type === 'number') {
+    return `/cards/${card.value}_${card.color}.png`;
+  }
+  
+  if (card.type === 'wild') {
+    return '/cards/wild.png';
+  }
+  
+  if (card.type === 'reverse_wild') {
+    return '/cards/reverse.png';
+  }
+  
+  if (card.type === 'action') {
+    if (card.value === '+2') return '/cards/plus2.png';
+    if (card.value === '+4') return '/cards/plus4.png';
+  }
+  
+  return '/cards/back.png';
+};
+
 // --- COMPONENTE PRINCIPAL ---
 const ViraVoltaMultiplayer = () => {
   const [screen, setScreen] = useState('menu');
@@ -63,6 +89,7 @@ const ViraVoltaMultiplayer = () => {
   // Modais
   const [showColorModal, setShowColorModal] = useState(false);
   const [pendingCardIndex, setPendingCardIndex] = useState(null);
+  const [errorModal, setErrorModal] = useState(null); // { title, message }
 
   useEffect(() => {
     if (!playerId) setPlayerId('player_' + Math.random().toString(36).substr(2, 9));
@@ -132,17 +159,17 @@ const ViraVoltaMultiplayer = () => {
       newDeck.push(card);
       newDeck.push({...card, id: `n_${i}_2_${Math.random()}`});
     }
-    // Coringas (Troca Cor)
-    for (let i = 0; i < 6; i++) {
+    // Coringas (Troca Cor) - 12 cartas
+    for (let i = 0; i < 12; i++) {
       newDeck.push({ id: `wild_${i}`, value: '★', type: 'wild', color: 'black', symbol: '🎭', label: 'CORINGA' });
     }
-    // Reverse (Inverte + Troca Cor)
-    for (let i = 0; i < 4; i++) {
+    // Reverse (Inverte + Troca Cor) - 6 cartas
+    for (let i = 0; i < 6; i++) {
       newDeck.push({ id: `rev_${i}`, value: '⇄', type: 'reverse_wild', color: 'black', symbol: '⇄', label: 'INVERTER' });
     }
-    // Ação (+2, +4)
+    // Ação (+2, +4) - 6 de cada
     ['+2', '+4'].forEach(act => {
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 6; i++) {
         newDeck.push({ id: `act_${act}_${i}_${Math.random()}`, value: act, type: 'action', color: 'black', symbol: act, label: 'ATAQUE' });
       }
     });
@@ -159,7 +186,7 @@ const ViraVoltaMultiplayer = () => {
   };
 
   const createRoom = async () => {
-    if (!playerName.trim()) return alert('Nome?');
+    if (!playerName.trim()) return showError('Ops!', 'Digite seu nome para criar uma sala.');
     const code = Math.random().toString(36).substr(2, 6).toUpperCase();
     if (database) {
       await set(ref(database, `rooms/${code}`), {
@@ -174,17 +201,19 @@ const ViraVoltaMultiplayer = () => {
   };
 
   const joinRoom = async () => {
-    if (!playerName.trim() || !roomCode.trim()) return alert('Dados?');
+    if (!playerName.trim() || !roomCode.trim()) return showError('Ops!', 'Digite seu nome e o código da sala.');
     const rRef = ref(database, `rooms/${roomCode.toUpperCase()}`);
     const snap = await get(rRef);
     if (snap.exists()) {
       const count = Object.keys(snap.val().players || {}).length;
-      if (count >= 4) return alert('Cheia!');
+      if (count >= 4) return showError('Sala Cheia!', 'Esta sala já tem 4 jogadores.');
       await update(ref(database, `rooms/${roomCode.toUpperCase()}/players/${playerId}`), {
         id: playerId, name: playerName, hand: [], ready: false, avatar: AVATARS[count % AVATARS.length], joinOrder: count
       });
       setRoom(roomCode.toUpperCase());
       setScreen('lobby');
+    } else {
+      showError('Sala não encontrada!', 'Verifique o código e tente novamente.');
     }
   };
 
@@ -200,7 +229,7 @@ const ViraVoltaMultiplayer = () => {
     const d = s.val();
     const pList = Object.values(d.players || {});
     
-    if (pList.length < 2 || !pList.every(p => p.ready)) return alert('Todos prontos?');
+    if (pList.length < 2 || !pList.every(p => p.ready)) return showError('Aguarde!', 'Todos os jogadores precisam estar prontos (mínimo 2).');
 
     const deck = createDeck();
     const hands = {};
@@ -271,15 +300,19 @@ const ViraVoltaMultiplayer = () => {
     // 2. Carta Preta (Coringas salvam do travamento matemático)
     if (card.color === 'black') return true;
 
-    // 3. Verifica se rolou o dado
-    if (!gameState.diceResult) return false;
-
-    // 4. REGRA DE COR (PAR/IMPAR)
+    // 3. REGRA DE COR (PAR/IMPAR)
     // O manual diz: "respeitar o símbolo do dado E TAMBÉM a cor"
     // Então, se a mesa é VERMELHA, só posso jogar VERMELHA.
     if (card.color !== gameState.activeColor) return false;
 
-    // 5. REGRA MATEMÁTICA
+    // 4. SE NÃO TEM VALOR ALVO (Coringa/Reverse na mesa), qualquer carta da cor certa vale
+    // Não precisa rolar dado nesse caso!
+    if (gameState.lastNumericValue === -1) return true;
+
+    // 5. Verifica se rolou o dado (só quando tem alvo numérico)
+    if (!gameState.diceResult) return false;
+
+    // 6. REGRA MATEMÁTICA
     const tableValue = gameState.lastNumericValue;
     const cardValue = card.value;
     const op = gameState.diceResult;
@@ -295,13 +328,13 @@ const ViraVoltaMultiplayer = () => {
     if (gameState.currentPlayerId !== playerId) return;
     const card = myHand[index];
     
-    // Feedback de erro
-    if (card.type === 'number' && !gameState.diceResult && gameState.mustDraw === 0) {
+    // Feedback de erro - só exige dado quando tem alvo numérico
+    if (card.type === 'number' && !gameState.diceResult && gameState.mustDraw === 0 && gameState.lastNumericValue !== -1) {
       showToast('🎲 Jogue o dado primeiro!');
       return;
     }
     
-    if (card.type === 'number' && gameState.diceResult && card.color !== gameState.activeColor) {
+    if (card.type === 'number' && gameState.lastNumericValue !== -1 && gameState.diceResult && card.color !== gameState.activeColor) {
        showToast(`❌ Cor errada! Precisa ser ${gameState.activeColor === 'red' ? 'VERMELHO' : 'VERDE'}`);
        return;
     }
@@ -348,8 +381,13 @@ const ViraVoltaMultiplayer = () => {
       updates.activeColor = card.color; // A carta jogada define a próxima cor obrigatória
     } 
     else {
-      // Wild/Action define a cor escolhida
+      // Wild/Reverse/Action define a cor escolhida e REMOVE o valor alvo
       if (chosenColor) updates.activeColor = chosenColor;
+      
+      // Coringa e Reverse não têm valor numérico - usar -1 como "sem alvo" (Firebase não aceita null em update)
+      if (card.type === 'wild' || card.type === 'reverse_wild') {
+        updates.lastNumericValue = -1;
+      }
       
       if (card.type === 'reverse_wild') updates.direction *= -1;
       if (card.type === 'action') {
@@ -400,6 +438,10 @@ const ViraVoltaMultiplayer = () => {
     setTimeout(() => setMessage(''), 3000);
   };
 
+  const showError = (title, message) => {
+    setErrorModal({ title, message });
+  };
+
   // --- COMPONENTES UI ---
   const Button = ({ children, onClick, color = 'blue', disabled, big }) => (
     <button onClick={onClick} disabled={disabled} style={{
@@ -407,7 +449,8 @@ const ViraVoltaMultiplayer = () => {
       border: '4px solid rgba(0,0,0,0.1)', background: disabled ? '#95a5a6' : COLORS[color], color: 'white',
       fontFamily: "'Comic Sans MS', cursive", fontWeight: 'bold', cursor: disabled ? 'default' : 'pointer',
       transform: disabled ? 'none' : 'scale(1)', transition: '0.1s', margin: '5px',
-      boxShadow: disabled ? 'none' : '0 6px 0 rgba(0,0,0,0.2)'
+      boxShadow: disabled ? 'none' : '0 6px 0 rgba(0,0,0,0.2)',
+      opacity: disabled ? 0.5 : 1
     }}
     onMouseDown={e => !disabled && (e.currentTarget.style.transform = 'translateY(4px)', e.currentTarget.style.boxShadow = 'none')}
     onMouseUp={e => !disabled && (e.currentTarget.style.transform = 'translateY(0)', e.currentTarget.style.boxShadow = '0 6px 0 rgba(0,0,0,0.2)')}
@@ -416,54 +459,41 @@ const ViraVoltaMultiplayer = () => {
     </button>
   );
 
+  // --- COMPONENTE CARD ATUALIZADO COM IMAGENS ---
   const Card = ({ card, onClick, small, disabled, isBack }) => {
-    const w = small ? 85 : 130;
-    const h = small ? 125 : 190;
+    const width = small ? 80 : 120;
+    const height = small ? 120 : 180; // Proporção 2:3 (400x600)
     
-    if (isBack) return (
-      <div style={{ width: w, height: h, borderRadius: 15, background: COLORS.cardBack, border: '4px solid white', display: 'flex', justifyContent: 'center', alignItems: 'center', boxShadow: '0 5px 15px rgba(0,0,0,0.3)' }}>
-        <span style={{ fontSize: '3em' }}>🐊</span>
-      </div>
-    );
-
-    let bg = '#ccc';
-    let isWild = false;
-    if (card.color === 'red') bg = COLORS.red;
-    if (card.color === 'green') bg = COLORS.green;
-    if (card.color === 'black') { bg = '#2f3542'; isWild = true; }
-
+    const imagePath = getCardImagePath(card, isBack);
+    
     return (
-      <div onClick={onClick} style={{
-        width: w, height: h, borderRadius: 15, background: bg, position: 'relative',
-        boxShadow: '0 5px 10px rgba(0,0,0,0.3)', border: '4px solid white',
-        cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
-        transform: disabled ? 'scale(0.95)' : 'scale(1)', transition: '0.2s', overflow: 'hidden'
-      }}>
-        {isWild && (
-          <div style={{
-            position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-            width: w * 0.85, height: w * 0.85, borderRadius: '50%',
-            background: `linear-gradient(90deg, ${COLORS.red} 50%, ${COLORS.green} 50%)`, 
-            border: '4px solid rgba(255,255,255,0.3)', zIndex: 1
-          }} />
-        )}
-        {isWild && (
-           <>
-            <div style={{position: 'absolute', top: 8, left: 8, width: 20, height: 20, borderRadius: '50%', background: `linear-gradient(90deg, ${COLORS.green} 50%, ${COLORS.red} 50%)`}}/>
-            <div style={{position: 'absolute', bottom: 8, right: 8, width: 20, height: 20, borderRadius: '50%', background: `linear-gradient(90deg, ${COLORS.red} 50%, ${COLORS.green} 50%)`}}/>
-           </>
-        )}
-
-        {!isWild && <div style={{position:'absolute', top:5, left:8, color:'white', fontWeight:'bold', fontSize:'1.4em'}}>{card.value}</div>}
-        {!isWild && <div style={{position:'absolute', bottom:5, right:8, color:'white', fontWeight:'bold', fontSize:'1.4em', transform:'rotate(180deg)'}}>{card.value}</div>}
-
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-          fontSize: small ? '2.5em' : '3.5em', zIndex: 2, color: 'white',
-          textShadow: '0 3px 0 rgba(0,0,0,0.2)'
-        }}>
-          {card.symbol}
-        </div>
+      <div 
+        onClick={disabled ? undefined : onClick} 
+        style={{
+          width: width,
+          height: height,
+          borderRadius: 12,
+          overflow: 'hidden',
+          cursor: disabled ? 'default' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          transform: disabled ? 'scale(0.95)' : 'scale(1)',
+          transition: 'all 0.2s ease',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.2)',
+          position: 'relative',
+        }}
+      >
+        <img 
+          src={imagePath}
+          alt={isBack ? 'Carta virada' : `Carta ${card?.value}`}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            display: 'block',
+            borderRadius: 12,
+          }}
+          draggable={false}
+        />
       </div>
     );
   };
@@ -476,8 +506,27 @@ const ViraVoltaMultiplayer = () => {
     display: 'flex', flexDirection: 'column', alignItems: 'center'
   };
 
+  // Modal de Erro
+  const ErrorModal = () => errorModal && (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 200,
+      display: 'flex', alignItems: 'center', justifyContent: 'center'
+    }}>
+      <div style={{
+        background: 'white', padding: '30px 40px', borderRadius: 25, textAlign: 'center',
+        border: `6px solid ${COLORS.red}`, maxWidth: 350, boxShadow: '0 10px 40px rgba(0,0,0,0.4)'
+      }}>
+        <div style={{ fontSize: '3em', marginBottom: 10 }}>😅</div>
+        <h2 style={{ color: COLORS.red, margin: '0 0 10px 0', fontSize: '1.5em' }}>{errorModal.title}</h2>
+        <p style={{ color: '#333', margin: '0 0 20px 0', fontSize: '1.1em' }}>{errorModal.message}</p>
+        <Button color="blue" big onClick={() => setErrorModal(null)}>OK</Button>
+      </div>
+    </div>
+  );
+
   if (screen === 'menu') return (
     <div style={{...containerStyle, justifyContent: 'center'}}>
+      <ErrorModal />
       <div style={{background: 'rgba(0,0,0,0.2)', padding: 40, borderRadius: 30, border: '6px solid rgba(255,255,255,0.2)', textAlign: 'center'}}>
         <h1 style={{fontSize: '4em', margin: 0, textShadow: '0 5px 0 #000'}}>🐊 ViraVolta</h1>
         <p style={{marginBottom: 30, fontSize: '1.2em'}}>Aprendendo com Jacaré Zezé</p>
@@ -496,6 +545,7 @@ const ViraVoltaMultiplayer = () => {
 
   if (screen === 'lobby') return (
     <div style={{...containerStyle, padding: 20}}>
+      <ErrorModal />
       <h2 style={{background: 'white', color: COLORS.bg, padding: '10px 40px', borderRadius: 50, border: `4px solid ${COLORS.gold}`}}>Sala: {room}</h2>
       <div style={{display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 20, width: '100%', maxWidth: 600, marginTop: 40}}>
         {players.map(p => (
@@ -540,6 +590,7 @@ const ViraVoltaMultiplayer = () => {
 
     return (
       <div style={containerStyle}>
+        <ErrorModal />
         {showColorModal && (
           <div style={{position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
             <div style={{background: 'white', padding: 30, borderRadius: 30, textAlign: 'center', border: `8px solid ${COLORS.gold}`}}>
@@ -585,7 +636,7 @@ const ViraVoltaMultiplayer = () => {
             boxShadow: `0 0 30px ${mustDraw ? COLORS.red : ruleColor}`,
             color: 'white', textShadow: '0 2px 4px rgba(0,0,0,0.3)', zIndex: 10, position: 'relative'
           }}>
-             {!mustDraw && (
+             {!mustDraw && gameState.lastNumericValue !== -1 && (
                <div style={{position: 'absolute', top: -30, background: 'rgba(0,0,0,0.6)', padding: '5px 10px', borderRadius: 10, color: 'white', fontSize: '0.8em'}}>
                  Alvo: {gameState.lastNumericValue}
                </div>
@@ -614,7 +665,7 @@ const ViraVoltaMultiplayer = () => {
 
         {/* AÇÕES */}
         <div style={{height: 80, display: 'flex', alignItems: 'center', gap: 20}}>
-          <Button onClick={rollDice} disabled={!!diceRes || !isMyTurn || mustDraw} big color="blue">
+          <Button onClick={rollDice} disabled={!!diceRes || !isMyTurn || mustDraw || gameState.lastNumericValue === -1} big color="blue">
             🎲 Rolar ({diceRes || '?'})
           </Button>
           <Button onClick={drawCard} disabled={!isMyTurn} big color={mustDraw ? "red" : "green"}>
@@ -638,6 +689,7 @@ const ViraVoltaMultiplayer = () => {
 
   if (screen === 'gameOver') return (
     <div style={{...containerStyle, justifyContent: 'center'}}>
+      <ErrorModal />
       <h1 style={{fontSize: '3em'}}>🏆 Fim de Jogo! 🏆</h1>
       <div style={{fontSize: '6em'}}>{players.find(p=>p.id===gameState.winner)?.avatar}</div>
       <h2 style={{margin: 20}}>{players.find(p=>p.id===gameState.winner)?.name} Venceu!</h2>
