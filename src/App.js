@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
 import { getDatabase, ref, set, onValue, update, get, remove } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
 
@@ -22,14 +22,6 @@ try {
 }
 
 // --- DADOS E CONSTANTES ---
-const HAND_SIGNS = {
-  0: '✊', 1: '👍', 2: '✌️', 3: '🤟', 4: '🖖', 5: '🖐️',
-  6: '🤙', 7: '👉', 8: '✊', 9: '👇', 10: '👆✊',
-  11: '👍👍', 12: '👍✌️', 13: '👍🤟', 14: '👍🖖',
-  15: '👍🖐️', 16: '👍🤙', 17: '👍👉', 18: '👍✊',
-  19: '👍👇', 20: '✌️✊'
-};
-
 const AVATARS = ['🐊', '🐸', '🐢', '🦎', '🐲', '🦖'];
 
 const COLORS = {
@@ -66,7 +58,7 @@ const getCardImagePath = (card, isBack = false) => {
     if (card.value === '+2') return '/cards/plus2.png';
     if (card.value === '+4') return '/cards/plus4.png';
   }
-
+  
   return '/cards/back.png';
 };
 
@@ -82,10 +74,36 @@ const ViraVoltaMultiplayer = () => {
   const [gameState, setGameState] = useState(null);
   const [myHand, setMyHand] = useState([]);
   const [message, setMessage] = useState('');
-  const [rolling, setRolling] = useState(false);
   const [timeLeft, setTimeLeft] = useState(TURN_TIME);
   const [hostId, setHostId] = useState(null);
   
+  // Refs para evitar ações duplicadas
+  const isProcessingAction = useRef(false);
+  const lastTurnPlayerId = useRef(null);
+  
+  // Função para tocar som de notificação
+  const playTurnSound = () => {
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.frequency.value = 880; // Nota A5
+      oscillator.type = 'sine';
+      
+      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 0.3);
+    } catch (e) {
+      console.log('Som não suportado');
+    }
+  };
+
   // Modais
   const [showColorModal, setShowColorModal] = useState(false);
   const [pendingCardIndex, setPendingCardIndex] = useState(null);
@@ -123,6 +141,28 @@ const ViraVoltaMultiplayer = () => {
     }
   }, [room, playerId, screen]);
 
+  // Detectar mudança de turno
+  useEffect(() => {
+    if (gameState?.started && !gameState?.ended && gameState.currentPlayerId) {
+      // Só dispara se mudou o jogador da vez
+      if (lastTurnPlayerId.current !== gameState.currentPlayerId) {
+        lastTurnPlayerId.current = gameState.currentPlayerId;
+        
+        if (gameState.currentPlayerId === playerId) {
+          // É minha vez!
+          playTurnSound();
+          showToast('🎯 Sua vez!');
+        } else {
+          // Vez de outro jogador
+          const currentPlayer = players.find(p => p.id === gameState.currentPlayerId);
+          if (currentPlayer) {
+            showToast(`⏳ Vez de ${currentPlayer.name}`);
+          }
+        }
+      }
+    }
+  }, [gameState?.currentPlayerId, gameState?.started, gameState?.ended, playerId, players]);
+
   // Timer
   useEffect(() => {
     if (gameState?.started && !gameState?.ended) {
@@ -131,14 +171,32 @@ const ViraVoltaMultiplayer = () => {
         const remaining = Math.max(0, TURN_TIME - elapsed);
         setTimeLeft(remaining);
         
-        // Se tempo acabou, compra automática
-        if (remaining <= 0 && gameState.currentPlayerId === playerId && !showColorModal) {
-          drawCard(); 
+        // Se tempo acabou e não está processando outra ação
+        if (remaining <= 0 && gameState.currentPlayerId === playerId && !isProcessingAction.current) {
+          isProcessingAction.current = true;
+          
+          // Se modal de cor está aberto, escolhe cor aleatória
+          if (showColorModal && pendingCardIndex !== null) {
+            const randomColor = Math.random() > 0.5 ? 'red' : 'green';
+            setShowColorModal(false);
+            finalizePlay(pendingCardIndex, randomColor).finally(() => {
+              isProcessingAction.current = false;
+            });
+            setPendingCardIndex(null);
+            showToast(`⏰ Tempo! Cor escolhida: ${randomColor === 'red' ? 'Vermelho' : 'Verde'}`);
+          } else if (!showColorModal) {
+            // Compra automática
+            drawCard().finally(() => {
+              isProcessingAction.current = false;
+            });
+          } else {
+            isProcessingAction.current = false;
+          }
         }
       }, 1000);
       return () => clearInterval(interval);
     }
-  }, [gameState, playerId, showColorModal]);
+  }, [gameState, playerId, showColorModal, pendingCardIndex]);
 
   // --- BARALHO E INÍCIO ---
 
@@ -152,7 +210,6 @@ const ViraVoltaMultiplayer = () => {
         value: i, 
         type: 'number', 
         color, 
-        symbol: HAND_SIGNS[i],
         label: i % 2 === 0 ? 'PAR' : 'ÍMPAR'
       };
       // 2 cópias de cada
@@ -161,16 +218,16 @@ const ViraVoltaMultiplayer = () => {
     }
     // Coringas (Troca Cor) - 12 cartas
     for (let i = 0; i < 12; i++) {
-      newDeck.push({ id: `wild_${i}`, value: '★', type: 'wild', color: 'black', symbol: '🎭', label: 'CORINGA' });
+      newDeck.push({ id: `wild_${i}`, value: '★', type: 'wild', color: 'black', label: 'CORINGA' });
     }
     // Reverse (Inverte + Troca Cor) - 6 cartas
     for (let i = 0; i < 6; i++) {
-      newDeck.push({ id: `rev_${i}`, value: '⇄', type: 'reverse_wild', color: 'black', symbol: '⇄', label: 'INVERTER' });
+      newDeck.push({ id: `rev_${i}`, value: '⇄', type: 'reverse_wild', color: 'black', label: 'INVERTER' });
     }
     // Ação (+2, +4) - 6 de cada
     ['+2', '+4'].forEach(act => {
       for (let i = 0; i < 6; i++) {
-        newDeck.push({ id: `act_${act}_${i}_${Math.random()}`, value: act, type: 'action', color: 'black', symbol: act, label: 'ATAQUE' });
+        newDeck.push({ id: `act_${act}_${i}_${Math.random()}`, value: act, type: 'action', color: 'black', label: 'ATAQUE' });
       }
     });
     return shuffle(newDeck);
@@ -202,13 +259,25 @@ const ViraVoltaMultiplayer = () => {
 
   const joinRoom = async () => {
     if (!playerName.trim() || !roomCode.trim()) return showError('Ops!', 'Digite seu nome e o código da sala.');
+    if (!database) return showError('Erro!', 'Conexão com servidor falhou. Recarregue a página.');
+    
     const rRef = ref(database, `rooms/${roomCode.toUpperCase()}`);
     const snap = await get(rRef);
     if (snap.exists()) {
-      const count = Object.keys(snap.val().players || {}).length;
-      if (count >= 4) return showError('Sala Cheia!', 'Esta sala já tem 4 jogadores.');
+      const roomData = snap.val();
+      const playersList = Object.keys(roomData.players || {});
+      
+      // Bug 9: Verifica se já está na sala
+      if (playersList.includes(playerId)) {
+        setRoom(roomCode.toUpperCase());
+        setScreen('lobby');
+        return;
+      }
+      
+      if (playersList.length >= 4) return showError('Sala Cheia!', 'Esta sala já tem 4 jogadores.');
+      
       await update(ref(database, `rooms/${roomCode.toUpperCase()}/players/${playerId}`), {
-        id: playerId, name: playerName, hand: [], ready: false, avatar: AVATARS[count % AVATARS.length], joinOrder: count
+        id: playerId, name: playerName, hand: [], ready: false, avatar: AVATARS[playersList.length % AVATARS.length], joinOrder: playersList.length
       });
       setRoom(roomCode.toUpperCase());
       setScreen('lobby');
@@ -217,13 +286,57 @@ const ViraVoltaMultiplayer = () => {
     }
   };
 
+  // Bug 10: Função para sair da sala
+  const leaveRoom = async () => {
+    if (!room || !database) return;
+    
+    try {
+      const roomRef = ref(database, `rooms/${room}`);
+      const snap = await get(roomRef);
+      
+      if (snap.exists()) {
+        const roomData = snap.val();
+        const playersList = Object.keys(roomData.players || {});
+        
+        // Se é o único jogador, deleta a sala
+        if (playersList.length <= 1) {
+          await set(roomRef, null);
+        } else {
+          // Remove o jogador
+          await set(ref(database, `rooms/${room}/players/${playerId}`), null);
+          
+          // Se era o host, passa para o próximo
+          if (roomData.host === playerId) {
+            const newHost = playersList.find(id => id !== playerId);
+            if (newHost) {
+              await update(roomRef, { host: newHost });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Erro ao sair:', error);
+    }
+    
+    setRoom(null);
+    setRoomCode('');
+    setScreen('menu');
+    setGameState(null);
+    setPlayers([]);
+    setMyHand([]);
+  };
+
   const toggleReady = async () => {
+    if (!database || !room) return;
     const pRef = ref(database, `rooms/${room}/players/${playerId}`);
     const s = await get(pRef);
-    await update(pRef, { ready: !s.val().ready });
+    if (s.exists()) {
+      await update(pRef, { ready: !s.val().ready });
+    }
   };
 
   const startGame = async () => {
+    if (!database || !room) return;
     const rRef = ref(database, `rooms/${room}`);
     const s = await get(rRef);
     const d = s.val();
@@ -274,7 +387,6 @@ const ViraVoltaMultiplayer = () => {
 
   const rollDice = async () => {
     if (gameState.currentPlayerId !== playerId || gameState.diceResult) return;
-    setRolling(true);
     
     setTimeout(async () => {
       // Probabilidade: 45% Maior, 45% Menor, 10% Igual
@@ -285,8 +397,8 @@ const ViraVoltaMultiplayer = () => {
       else res = '=';
 
       await update(ref(database, `rooms/${room}/gameState`), { diceResult: res });
-      setRolling(false);
-      showToast(`Dado: ${res}`);
+      const diceNames = { '>': 'MAIOR', '<': 'MENOR', '=': 'IGUAL' };
+      showToast(`🐊 ${diceNames[res]}!`);
     }, 600);
   };
 
@@ -360,12 +472,14 @@ const ViraVoltaMultiplayer = () => {
     const newHand = [...myHand];
     newHand.splice(idx, 1);
     
+    // Sempre atualiza a mão primeiro
+    await update(ref(database, `rooms/${room}/players/${playerId}`), { hand: newHand });
+    
+    // Se mão vazia, jogador venceu
     if (newHand.length === 0) {
-      await update(ref(database, `rooms/${room}`), { 'gameState/winner': playerId, 'gameState/ended': true });
+      await update(ref(database, `rooms/${room}/gameState`), { winner: playerId, ended: true });
       return;
     }
-
-    await update(ref(database, `rooms/${room}/players/${playerId}`), { hand: newHand });
     
     let updates = {
       discardPile: [...gameState.discardPile, card],
@@ -384,8 +498,8 @@ const ViraVoltaMultiplayer = () => {
       // Wild/Reverse/Action define a cor escolhida e REMOVE o valor alvo
       if (chosenColor) updates.activeColor = chosenColor;
       
-      // Coringa e Reverse não têm valor numérico - usar -1 como "sem alvo" (Firebase não aceita null em update)
-      if (card.type === 'wild' || card.type === 'reverse_wild') {
+      // Coringa, Reverse e Ações (+2, +4) não têm valor numérico
+      if (card.type === 'wild' || card.type === 'reverse_wild' || card.type === 'action') {
         updates.lastNumericValue = -1;
       }
       
@@ -525,18 +639,18 @@ const ViraVoltaMultiplayer = () => {
   );
 
   if (screen === 'menu') return (
-    <div style={{...containerStyle, justifyContent: 'center'}}>
+    <div style={{...containerStyle, justifyContent: 'center', alignItems: 'center', minHeight: '100vh', padding: 20, boxSizing: 'border-box', overflow: 'auto'}}>
       <ErrorModal />
-      <div style={{background: 'rgba(0,0,0,0.2)', padding: 40, borderRadius: 30, border: '6px solid rgba(255,255,255,0.2)', textAlign: 'center'}}>
-        <h1 style={{fontSize: '4em', margin: 0, textShadow: '0 5px 0 #000'}}>🐊 ViraVolta</h1>
-        <p style={{marginBottom: 30, fontSize: '1.2em'}}>Aprendendo com Jacaré Zezé</p>
+      <div style={{background: 'rgba(0,0,0,0.2)', padding: '30px 40px', borderRadius: 30, border: '6px solid rgba(255,255,255,0.2)', textAlign: 'center', maxWidth: 400, width: '100%'}}>
+        <img src="/logo.png" alt="ViraVolta" style={{ width: '100%', maxWidth: 250, marginBottom: 5 }} />
+        <p style={{marginBottom: 20, fontSize: '1.1em'}}>Aprendendo com Jacaré Zezé</p>
         <input placeholder="Seu Nome" value={playerName} onChange={e=>setPlayerName(e.target.value)}
-          style={{display: 'block', width: '100%', padding: 15, borderRadius: 15, border: 'none', marginBottom: 15, fontSize: '1.2em', textAlign: 'center'}} />
+          style={{display: 'block', width: '100%', padding: 12, borderRadius: 15, border: 'none', marginBottom: 10, fontSize: '1.1em', textAlign: 'center', boxSizing: 'border-box'}} />
         <Button big color="gold" onClick={createRoom}>✨ Criar Sala</Button>
-        <div style={{margin: 20}}>ou</div>
+        <div style={{margin: 15}}>ou</div>
         <div style={{display: 'flex', gap: 10}}>
           <input placeholder="CÓDIGO" value={roomCode} onChange={e=>setRoomCode(e.target.value.toUpperCase())}
-            style={{flex: 1, padding: 15, borderRadius: 15, border: 'none', fontSize: '1.2em', textAlign: 'center', textTransform: 'uppercase'}} />
+            style={{flex: 1, padding: 12, borderRadius: 15, border: 'none', fontSize: '1.1em', textAlign: 'center', textTransform: 'uppercase'}} />
           <Button big onClick={joinRoom}>Entrar</Button>
         </div>
       </div>
@@ -551,7 +665,9 @@ const ViraVoltaMultiplayer = () => {
         {players.map(p => (
           <div key={p.id} style={{
             background: p.ready ? COLORS.green : 'rgba(0,0,0,0.2)',
-            padding: 20, borderRadius: 20, textAlign: 'center', border: p.id===hostId ? `4px solid ${COLORS.gold}` : '4px solid transparent'
+            padding: 20, borderRadius: 20, textAlign: 'center', 
+            border: p.id===hostId ? `4px solid ${COLORS.gold}` : '4px solid transparent',
+            position: 'relative'
           }}>
             {p.id === hostId && <div style={{position: 'absolute', top: -15, right: -10, fontSize: '2em'}}>👑</div>}
             <div style={{fontSize: '4em'}}>{p.avatar}</div>
@@ -560,8 +676,9 @@ const ViraVoltaMultiplayer = () => {
           </div>
         ))}
       </div>
-      <div style={{marginTop: 'auto', marginBottom: 40, display: 'flex', gap: 20}}>
-        <Button big color={players.find(p=>p.id===playerId)?.ready ? 'red' : 'green'} onClick={toggleReady}>
+      <div style={{marginTop: 'auto', marginBottom: 40, display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center'}}>
+        <Button big color="red" onClick={leaveRoom}>🚪 Sair</Button>
+        <Button big color={players.find(p=>p.id===playerId)?.ready ? 'gold' : 'green'} onClick={toggleReady}>
           {players.find(p=>p.id===playerId)?.ready ? 'Cancelar' : 'Estou Pronto!'}
         </Button>
         {hostId === playerId && <Button big color="blue" onClick={startGame}>Começar Jogo</Button>}
@@ -576,12 +693,16 @@ const ViraVoltaMultiplayer = () => {
     const mustDraw = gameState.mustDraw > 0;
     
     // Mostra o que precisa ser feito no HUD
-    // Se tiver dado, mostra Símbolo + Cor
+    // Se tiver dado, mostra Imagem do Jacaré + Cor
     let ruleDisplay = '🎲';
     let ruleColor = COLORS.gold;
+    let zezeImage = null;
     
     if (diceRes) {
-       ruleDisplay = diceRes;
+       if (diceRes === '>') zezeImage = '/alligator_1.png';
+       else if (diceRes === '=') zezeImage = '/alligator_2.png';
+       else if (diceRes === '<') zezeImage = '/alligator_3.png';
+       
        ruleColor = gameState.activeColor === 'red' ? COLORS.red : COLORS.green;
     } else if (!mustDraw) {
        // Se não tem dado mas tem cor ativa anterior (aguardando rolar)
@@ -590,6 +711,12 @@ const ViraVoltaMultiplayer = () => {
 
     return (
       <div style={containerStyle}>
+        <style>{`
+          @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+          }
+        `}</style>
         <ErrorModal />
         {showColorModal && (
           <div style={{position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
@@ -612,6 +739,19 @@ const ViraVoltaMultiplayer = () => {
         {/* HUD */}
         <div style={{display: 'flex', justifyContent: 'space-between', width: '100%', padding: 20, boxSizing: 'border-box'}}>
           <div style={{background: 'rgba(0,0,0,0.3)', padding: '5px 20px', borderRadius: 20, border: '2px solid rgba(255,255,255,0.2)'}}>⏱️ {timeLeft}s</div>
+          
+          {/* Indicador de turno */}
+          <div style={{
+            background: isMyTurn ? COLORS.gold : 'rgba(0,0,0,0.3)', 
+            padding: '5px 20px', 
+            borderRadius: 20, 
+            border: isMyTurn ? '2px solid white' : '2px solid rgba(255,255,255,0.2)',
+            fontWeight: 'bold',
+            animation: isMyTurn ? 'pulse 1s infinite' : 'none'
+          }}>
+            {isMyTurn ? '🎯 SUA VEZ!' : `⏳ ${players.find(p => p.id === gameState.currentPlayerId)?.name || '...'}`}
+          </div>
+          
           <div style={{background: 'rgba(0,0,0,0.3)', padding: '5px 20px', borderRadius: 20, border: '2px solid rgba(255,255,255,0.2)'}}>🃏 {gameState.deck.length}</div>
         </div>
 
@@ -650,7 +790,11 @@ const ViraVoltaMultiplayer = () => {
             ) : (
               <>
                 <div style={{fontSize: '0.8em', textTransform: 'uppercase', opacity: 0.9}}>JOGUE</div>
-                <div style={{fontSize: '4em', fontWeight: 'bold', lineHeight: 0.9}}>{ruleDisplay}</div>
+                {zezeImage ? (
+                  <img src={zezeImage} alt={diceRes} style={{ width: 80, height: 'auto', marginTop: 5, marginBottom: 5 }} />
+                ) : (
+                  <div style={{fontSize: '4em', fontWeight: 'bold', lineHeight: 0.9}}>{ruleDisplay}</div>
+                )}
                 {diceRes && (
                    <div style={{fontSize: '0.7em', marginTop: 5, fontWeight: 'bold'}}>
                       {gameState.activeColor === 'red' ? 'VERMELHO' : 'VERDE'}
@@ -666,7 +810,7 @@ const ViraVoltaMultiplayer = () => {
         {/* AÇÕES */}
         <div style={{height: 80, display: 'flex', alignItems: 'center', gap: 20}}>
           <Button onClick={rollDice} disabled={!!diceRes || !isMyTurn || mustDraw || gameState.lastNumericValue === -1} big color="blue">
-            🎲 Rolar ({diceRes || '?'})
+            🎲 Rolar {diceRes ? (diceRes === '>' ? '(MAIOR)' : diceRes === '<' ? '(MENOR)' : '(IGUAL)') : ''}
           </Button>
           <Button onClick={drawCard} disabled={!isMyTurn} big color={mustDraw ? "red" : "green"}>
             {mustDraw ? `Pegar ${gameState.mustDraw}` : '📥 Comprar'}
@@ -691,9 +835,12 @@ const ViraVoltaMultiplayer = () => {
     <div style={{...containerStyle, justifyContent: 'center'}}>
       <ErrorModal />
       <h1 style={{fontSize: '3em'}}>🏆 Fim de Jogo! 🏆</h1>
-      <div style={{fontSize: '6em'}}>{players.find(p=>p.id===gameState.winner)?.avatar}</div>
-      <h2 style={{margin: 20}}>{players.find(p=>p.id===gameState.winner)?.name} Venceu!</h2>
-      <Button big onClick={()=>setScreen('menu')}>Voltar ao Menu</Button>
+      <div style={{fontSize: '6em'}}>{players.find(p=>p.id===gameState?.winner)?.avatar}</div>
+      <h2 style={{margin: 20}}>{players.find(p=>p.id===gameState?.winner)?.name} Venceu!</h2>
+      <div style={{display: 'flex', gap: 15}}>
+        <Button big color="red" onClick={leaveRoom}>🚪 Sair</Button>
+        <Button big color="green" onClick={()=>setScreen('lobby')}>Voltar ao Lobby</Button>
+      </div>
     </div>
   );
 
